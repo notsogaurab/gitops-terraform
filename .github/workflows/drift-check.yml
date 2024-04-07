@@ -1,69 +1,50 @@
-name: Drift Check
+name: Drift Detection and Reconciliation
+
 on:
   schedule:
-    - cron: "*/1 * * * *"
+    - cron: '0 0 * * *'  # Run every day at midnight UTC
+  workflow_dispatch:
+
 jobs:
-  build:
-    name: Deploy and Release
+  drift-detection-and-reconciliation:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v3
-      - name: Configure terraform
+
+      - name: Configure Terraform
         uses: hashicorp/setup-terraform@v2
         with:
           terraform_version: 1.5.0
-      - name: Terraform format
-        run: terraform fmt -check -recursive
+
       - name: Terraform init
         run: terraform init
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-      - name: Terraform validate
-        run: terraform validate
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
 
-      - name: Terraform Workspace Select
-        run: terraform workspace select -or-create dev
+      - name: Terraform plan
+        run: terraform plan -out=tfplan -detailed-exitcode
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
 
-      - name: Terraform Plan and Check for Changes
+      - name: Check for drift
         run: |
-          terraform plan > plan_output.txt
-          if grep -q "No changes" plan_output.txt; then
-            echo "NO_CHANGES=true" >> $GITHUB_ENV
+          PLAN_EXIT_CODE=$?
+          if [ $PLAN_EXIT_CODE -eq 2 ]; then
+            echo "Drift detected, applying changes..."
+            terraform apply -auto-approve tfplan
+          elif [ $PLAN_EXIT_CODE -eq 0 ]; then
+            echo "No drift detected"
           else
-            echo "NO_CHANGES=false" >> $GITHUB_ENV
+            echo "Terraform plan failed with exit code $PLAN_EXIT_CODE"
+            exit $PLAN_EXIT_CODE
           fi
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-      - name: Check drift-check
-        run: |
-          echo ${{ env.NO_CHANGES }}
-
-      - name: Terraform apply
-        if: env.NO_CHANGES == 'false'
-        run: |
-          max_retries=5
-          wait_seconds=60
-          attempt=0
-          until terraform apply -auto-approve; do
-            attempt=$((attempt + 1))
-            if [ "$attempt" -ge "$max_retries" ]; then
-              echo "Attempt $attempt failed! No more retries left."
-              exit 1
-            else
-              echo "Attempt $attempt failed! Retrying in $wait_seconds seconds..."
-              sleep $wait_seconds
-            fi
-          done
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
+          AWS_DEFAULT_REGION: ${{ secrets.AWS_DEFAULT_REGION }}
